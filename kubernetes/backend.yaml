@@ -12,7 +12,6 @@ spec:
       app: backend
   template:
     metadata:
-      name: backend
       labels:
         app: backend
     spec:
@@ -22,10 +21,12 @@ spec:
           ports:
             - containerPort: 8080
           env:
-            - name: MONGO_URL
+            - name: MONGODB_URI
               value: "mongodb://mongo-service:27017/wanderlust"
             - name: REDIS_URL
               value: "redis://redis-service:6379"
+            - name: FRONTEND_URL
+              value: "http://10.202.252.132:31000"
 ---
 apiVersion: v1
 kind: Service

@@ -7,110 +7,129 @@ pipeline {
     }
 
     parameters {
-        // Optional: manually run karte waqt tag override karna ho to use kar sakte ho
         string(name: 'FRONTEND_DOCKER_TAG', defaultValue: '', description: 'Frontend Docker tag override (optional)')
         string(name: 'BACKEND_DOCKER_TAG', defaultValue: '', description: 'Backend Docker tag override (optional)')
     }
 
+    // 🔴 IMPORTANT: concurrent build band
+    options {
+        disableConcurrentBuilds()
+    }
+
     stages {
+
         stage("Workspace cleanup") {
             steps {
-                script {
-                    cleanWs()
-                }
+                cleanWs()
             }
         }
 
         stage("Git: Code Checkout") {
             steps {
+                code_checkout("https://github.com/YR55/Wanderlust-Mega-Project.git", "main")
+            }
+        }
+
+        // 🔐 BOT COMMIT GUARD (NEW)
+        stage("CI Guard: Skip bot commits") {
+            steps {
                 script {
-                    code_checkout("https://github.com/YR55/Wanderlust-Mega-Project.git", "main")
+                    def commitMsg = sh(
+                        script: "git log -1 --pretty=%B",
+                        returnStdout: true
+                    ).trim()
+
+                    echo "Last commit message: ${commitMsg}"
+
+                    if (commitMsg.contains("[ci-skip-bot]")) {
+                        echo "Bot commit detected → CI will stop safely"
+
+                        env.SKIP_CD = "true"
+                        currentBuild.result = "SUCCESS"
+                        return
+                    }
+
+                    env.SKIP_CD = "false"
                 }
             }
         }
 
         stage("Prepare Image Tags") {
+            when { expression { env.SKIP_CD == "false" } }
             steps {
                 script {
-                    // Latest commit ka short hash
-                    def gitCommit = sh(script: "git rev-parse --short HEAD", returnStdout: true).trim()
+                    def gitCommit = sh(
+                        script: "git rev-parse --short HEAD",
+                        returnStdout: true
+                    ).trim()
 
-                    // FRONTEND tag: param ho to use karo, warna auto-generate
                     if (!params.FRONTEND_DOCKER_TAG?.trim()) {
                         env.FRONTEND_DOCKER_TAG = "${gitCommit}-${env.BUILD_NUMBER}"
                     } else {
                         env.FRONTEND_DOCKER_TAG = params.FRONTEND_DOCKER_TAG.trim()
                     }
 
-                    // BACKEND tag: param ho to use karo, warna auto-generate
                     if (!params.BACKEND_DOCKER_TAG?.trim()) {
                         env.BACKEND_DOCKER_TAG = "${gitCommit}-${env.BUILD_NUMBER}"
                     } else {
                         env.BACKEND_DOCKER_TAG = params.BACKEND_DOCKER_TAG.trim()
                     }
 
-                    echo "Using FRONTEND_DOCKER_TAG = ${env.FRONTEND_DOCKER_TAG}"
-                    echo "Using BACKEND_DOCKER_TAG = ${env.BACKEND_DOCKER_TAG}"
+                    echo "FRONTEND_DOCKER_TAG = ${env.FRONTEND_DOCKER_TAG}"
+                    echo "BACKEND_DOCKER_TAG = ${env.BACKEND_DOCKER_TAG}"
                 }
             }
         }
 
         stage("Trivy: Filesystem scan") {
+            when { expression { env.SKIP_CD == "false" } }
             steps {
-                script {
-                    withEnv(['TRIVY_TIMEOUT=30m']) {
-                        trivy_scan()
-                    }
+                withEnv(['TRIVY_TIMEOUT=30m']) {
+                    trivy_scan()
                 }
             }
         }
 
         stage("OWASP: Dependency check") {
+            when { expression { env.SKIP_CD == "false" } }
             steps {
-                script {
-                    owasp_dependency()
-                }
+                owasp_dependency()
             }
         }
 
         stage("SonarQube: Code Analysis") {
+            when { expression { env.SKIP_CD == "false" } }
             steps {
-                script {
-                    withEnv(['SONAR_SCANNER_OPTS=-Dsonar.ws.timeout=600']) {
-                        sonarqube_analysis("SonarQube", "wanderlust", "wanderlust")
-                    }
+                withEnv(['SONAR_SCANNER_OPTS=-Dsonar.ws.timeout=600']) {
+                    sonarqube_analysis("SonarQube", "wanderlust", "wanderlust")
                 }
             }
         }
 
         stage("SonarQube: Code Quality Gates") {
+            when { expression { env.SKIP_CD == "false" } }
             steps {
-                script {
-                    timeout(time: 20, unit: 'MINUTES') {
-                        sonarqube_code_quality()
-                    }
+                timeout(time: 20, unit: 'MINUTES') {
+                    sonarqube_code_quality()
                 }
             }
         }
 
         stage("Exporting environment variables") {
+            when { expression { env.SKIP_CD == "false" } }
             parallel {
                 stage("Backend env setup") {
                     steps {
-                        script {
-                            dir("Automations") {
-                                sh "bash updatebackendnew.sh"
-                            }
+                        dir("Automations") {
+                            sh "bash updatebackendnew.sh"
                         }
                     }
                 }
 
                 stage("Frontend env setup") {
                     steps {
-                        script {
-                            dir("Automations") {
-                                sh "bash updatefrontendnew.sh"
-                            }
+                        dir("Automations") {
+                            sh "bash updatefrontendnew.sh"
                         }
                     }
                 }
@@ -118,24 +137,19 @@ pipeline {
         }
 
         stage("Docker: Build Images") {
+            when { expression { env.SKIP_CD == "false" } }
             steps {
-                script {
-                    withEnv(['DOCKER_CLIENT_TIMEOUT=300', 'COMPOSE_HTTP_TIMEOUT=300']) {
+                withEnv(['DOCKER_CLIENT_TIMEOUT=300', 'COMPOSE_HTTP_TIMEOUT=300']) {
 
-                        // Backend image build
-                        retry(3) {
-                            dir('backend') {
-                                echo "Building backend image..."
-                                docker_build("wanderlust-backend-beta", "${env.BACKEND_DOCKER_TAG}", "yogeshverma08")
-                            }
+                    retry(3) {
+                        dir('backend') {
+                            docker_build("wanderlust-backend-beta", env.BACKEND_DOCKER_TAG, "yogeshverma08")
                         }
+                    }
 
-                        // Frontend image build
-                        retry(3) {
-                            dir('frontend') {
-                                echo "Building frontend image..."
-                                docker_build("wanderlust-frontend-beta", "${env.FRONTEND_DOCKER_TAG}", "yogeshverma08")
-                            }
+                    retry(3) {
+                        dir('frontend') {
+                            docker_build("wanderlust-frontend-beta", env.FRONTEND_DOCKER_TAG, "yogeshverma08")
                         }
                     }
                 }
@@ -143,19 +157,16 @@ pipeline {
         }
 
         stage("Docker: Push to DockerHub") {
+            when { expression { env.SKIP_CD == "false" } }
             steps {
-                script {
-                    withEnv(['DOCKER_CLIENT_TIMEOUT=300', 'COMPOSE_HTTP_TIMEOUT=300']) {
+                withEnv(['DOCKER_CLIENT_TIMEOUT=300', 'COMPOSE_HTTP_TIMEOUT=300']) {
 
-                        retry(3) {
-                            echo "Pushing backend image to DockerHub..."
-                            docker_push("wanderlust-backend-beta", "${env.BACKEND_DOCKER_TAG}", "yogeshverma08")
-                        }
+                    retry(3) {
+                        docker_push("wanderlust-backend-beta", env.BACKEND_DOCKER_TAG, "yogeshverma08")
+                    }
 
-                        retry(3) {
-                            echo "Pushing frontend image to DockerHub..."
-                            docker_push("wanderlust-frontend-beta", "${env.FRONTEND_DOCKER_TAG}", "yogeshverma08")
-                        }
+                    retry(3) {
+                        docker_push("wanderlust-frontend-beta", env.FRONTEND_DOCKER_TAG, "yogeshverma08")
                     }
                 }
             }
@@ -164,11 +175,16 @@ pipeline {
 
     post {
         success {
-            archiveArtifacts artifacts: '*.xml', followSymlinks: false
-            build job: "Wanderlust-CD", parameters: [
-                string(name: 'FRONTEND_DOCKER_TAG', value: "${env.FRONTEND_DOCKER_TAG}"),
-                string(name: 'BACKEND_DOCKER_TAG', value: "${env.BACKEND_DOCKER_TAG}")
-            ]
+            script {
+                if (env.SKIP_CD == "false") {
+                    build job: "Wanderlust-CD", parameters: [
+                        string(name: 'FRONTEND_DOCKER_TAG', value: env.FRONTEND_DOCKER_TAG),
+                        string(name: 'BACKEND_DOCKER_TAG', value: env.BACKEND_DOCKER_TAG)
+                    ]
+                } else {
+                    echo "CD trigger skipped (bot commit)"
+                }
+            }
         }
     }
 }
